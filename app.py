@@ -20,8 +20,6 @@ MESES_ORDEN = [
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ]
 
-MESES_HISTORICOS = ["Enero", "Febrero", "Marzo"]
-
 SHEET_URL = "https://docs.google.com/spreadsheets/d/107Niw43NSOXpYi7knGkemTlnYU2xkK56020mRC25Z60/gviz/tq?tqx=out:csv&sheet=Limpio"
 
 COLOR_BG = "#0F1115"
@@ -193,6 +191,23 @@ def format_currency_short(valor):
     return f"{valor:,.0f}"
 
 
+def ordenar_meses(meses):
+    return [mes for mes in MESES_ORDEN if mes in meses]
+
+
+def unir_meses_legible(meses):
+    meses = ordenar_meses(meses)
+
+    if not meses:
+        return ""
+    if len(meses) == 1:
+        return meses[0]
+    if len(meses) == 2:
+        return f"{meses[0]} y {meses[1]}"
+
+    return f"{', '.join(meses[:-1])} y {meses[-1]}"
+
+
 @st.cache_data(ttl=300)
 def cargar_datos():
     response = requests.get(SHEET_URL, verify=certifi.where(), timeout=30)
@@ -259,6 +274,34 @@ def aplicar_filtros(df_base, meses_sel, tipos_sel, escenarios_sel):
     return out
 
 
+def obtener_mes_foco(df_base):
+    df_escenarios = df_base[df_base["Escenario"].isin(["Real", "Proyectado"])].copy()
+
+    if df_escenarios.empty:
+        meses_presentes = ordenar_meses(df_base["Mes"].dropna().astype(str).unique().tolist())
+        return meses_presentes[-1] if meses_presentes else "Marzo"
+
+    tabla = (
+        df_escenarios.groupby(["Mes", "Escenario"], as_index=False)
+        .size()
+        .pivot(index="Mes", columns="Escenario", values="size")
+        .fillna(0)
+    )
+
+    meses_validos = [
+        mes for mes in MESES_ORDEN
+        if mes in tabla.index
+        and tabla.at[mes, "Real"] > 0
+        and tabla.at[mes, "Proyectado"] > 0
+    ]
+
+    if meses_validos:
+        return meses_validos[-1]
+
+    meses_presentes = ordenar_meses(df_base["Mes"].dropna().astype(str).unique().tolist())
+    return meses_presentes[-1] if meses_presentes else "Marzo"
+
+
 def calcular_total(df_base, tipo, escenario):
     return df_base.loc[
         (df_base["Tipo"] == tipo) & (df_base["Escenario"] == escenario),
@@ -282,12 +325,14 @@ def preparar_desvios(df_base):
     df_comp = df_base[df_base["Escenario"].isin(["Real", "Proyectado"])].copy()
 
     if df_comp.empty:
-        return pd.DataFrame(columns=["Subcategoria", "Real", "Proyectado", "Desvio", "AbsDesvio"])
+        return pd.DataFrame(
+            columns=["Tipo", "Subcategoria", "Real", "Proyectado", "Desvio", "ImpactoFlujo", "AbsImpactoFlujo"]
+        )
 
     tabla = (
-        df_comp.groupby(["Subcategoria", "Escenario"], as_index=False)["Monto"]
+        df_comp.groupby(["Tipo", "Subcategoria", "Escenario"], as_index=False)["Monto"]
         .sum()
-        .pivot(index="Subcategoria", columns="Escenario", values="Monto")
+        .pivot(index=["Tipo", "Subcategoria"], columns="Escenario", values="Monto")
         .fillna(0)
         .reset_index()
     )
@@ -298,20 +343,44 @@ def preparar_desvios(df_base):
         tabla["Proyectado"] = 0
 
     tabla["Desvio"] = tabla["Real"] - tabla["Proyectado"]
-    tabla["AbsDesvio"] = tabla["Desvio"].abs()
+    tabla["ImpactoFlujo"] = tabla["Desvio"]
+    tabla.loc[tabla["Tipo"] == "Egreso", "ImpactoFlujo"] = (
+        tabla.loc[tabla["Tipo"] == "Egreso", "Proyectado"] - tabla.loc[tabla["Tipo"] == "Egreso", "Real"]
+    )
+    tabla["AbsImpactoFlujo"] = tabla["ImpactoFlujo"].abs()
 
-    return tabla.sort_values("AbsDesvio", ascending=False)
+    return tabla.sort_values("AbsImpactoFlujo", ascending=False)
 
 
-def construir_base_historica(df_original):
-    enero_febrero = df_original[df_original["Mes"].isin(["Enero", "Febrero"])].copy()
-    marzo_real = df_original[
-        (df_original["Mes"] == "Marzo") &
-        (df_original["Escenario"] == "Real")
-    ].copy()
+def obtener_meses_historicos(df_original, mes_referencia):
+    meses_presentes = set(df_original["Mes"].dropna().astype(str).tolist())
 
-    base = pd.concat([enero_febrero, marzo_real], ignore_index=True)
-    base["Mes"] = pd.Categorical(base["Mes"], categories=MESES_HISTORICOS, ordered=True)
+    if mes_referencia not in MESES_ORDEN:
+        return ordenar_meses(meses_presentes)
+
+    idx_referencia = MESES_ORDEN.index(mes_referencia)
+    return [mes for mes in MESES_ORDEN[:idx_referencia + 1] if mes in meses_presentes]
+
+
+def construir_base_historica(df_original, meses_historicos):
+    partes = []
+
+    for mes in meses_historicos:
+        df_mes = df_original[df_original["Mes"] == mes].copy()
+
+        if df_mes.empty:
+            continue
+
+        if df_mes["Escenario"].isin(["Real", "Proyectado"]).any():
+            partes.append(df_mes[df_mes["Escenario"] == "Real"].copy())
+        else:
+            partes.append(df_mes)
+
+    if not partes:
+        return pd.DataFrame(columns=df_original.columns)
+
+    base = pd.concat(partes, ignore_index=True)
+    base["Mes"] = pd.Categorical(base["Mes"], categories=meses_historicos, ordered=True)
 
     return base
 
@@ -334,7 +403,8 @@ def preparar_historico_flujo(base_hist):
         resumen["Egreso"] = 0
 
     resumen["Flujo"] = resumen["Ingreso"] - resumen["Egreso"]
-    resumen["Mes"] = pd.Categorical(resumen["Mes"], categories=MESES_HISTORICOS, ordered=True)
+    meses_historicos = ordenar_meses(resumen["Mes"].astype(str).tolist())
+    resumen["Mes"] = pd.Categorical(resumen["Mes"], categories=meses_historicos, ordered=True)
 
     return resumen.sort_values("Mes")
 
@@ -360,7 +430,8 @@ def preparar_top10_egresos_historicos(base_hist):
         .sum()
     )
 
-    comparativa["Mes"] = pd.Categorical(comparativa["Mes"], categories=MESES_HISTORICOS, ordered=True)
+    meses_historicos = ordenar_meses(comparativa["Mes"].astype(str).tolist())
+    comparativa["Mes"] = pd.Categorical(comparativa["Mes"], categories=meses_historicos, ordered=True)
 
     orden_subcats = (
         comparativa.groupby("Subcategoria")["Monto"]
@@ -395,21 +466,21 @@ def mensaje_ingresos_egresos(ing_real, ing_proy, egr_real, egr_proy):
 
 def mensaje_concentracion(df_desvios):
     if df_desvios.empty:
-        return "No hay desvíos suficientes para analizar concentración."
+        return "No hay impactos suficientes para analizar concentración."
 
-    total_abs = df_desvios["AbsDesvio"].sum()
+    total_abs = df_desvios["AbsImpactoFlujo"].sum()
 
     if total_abs == 0:
-        return "No hay desvíos relevantes para analizar concentración."
+        return "No hay impactos relevantes para analizar concentración."
 
-    top5_abs = df_desvios.head(5)["AbsDesvio"].sum()
-    top2_abs = df_desvios.head(2)["AbsDesvio"].sum()
+    top5_abs = df_desvios.head(5)["AbsImpactoFlujo"].sum()
+    top2_abs = df_desvios.head(2)["AbsImpactoFlujo"].sum()
 
     porcentaje_top5 = (top5_abs / total_abs) * 100
     porcentaje_top2 = (top2_abs / total_abs) * 100
 
     return (
-        f"Los 5 mayores desvíos explican {porcentaje_top5:.1f}% del desvío total. "
+        f"Los 5 mayores impactos explican {porcentaje_top5:.1f}% del impacto total. "
         f"Los 2 principales explican {porcentaje_top2:.1f}%."
     )
 
@@ -444,7 +515,8 @@ def crear_fig_bar_simple(df_plot, x, y, color=None, orientation=None, title=""):
             "Proyectado": COLOR_PROY,
             "Enero": "#4C78FF",
             "Febrero": "#7F8A9A",
-            "Marzo": "#C97A2B"
+            "Marzo": "#C97A2B",
+            "Abril": "#2E8B57"
         } if color else None
     )
 
@@ -522,18 +594,19 @@ def render_kpi_card(label, value):
 # CARGA DE DATOS
 # =========================================================
 df = cargar_datos()
+mes_foco_default = obtener_mes_foco(df)
 
 # =========================================================
 # RESET FILTROS
 # =========================================================
 if st.sidebar.button("Resetear filtros"):
-    st.session_state["meses_sel"] = ["Marzo"]
+    st.session_state["meses_sel"] = [mes_foco_default]
     st.session_state["tipos_sel"] = ["Ingreso", "Egreso"]
     st.session_state["escenarios_sel"] = ["Real", "Proyectado"]
 
 # Defaults seguros
 if "meses_sel" not in st.session_state:
-    st.session_state["meses_sel"] = ["Marzo"]
+    st.session_state["meses_sel"] = [mes_foco_default]
 
 if "tipos_sel" not in st.session_state:
     st.session_state["tipos_sel"] = ["Ingreso", "Egreso"]
@@ -603,8 +676,9 @@ comparacion_ingresos = preparar_comparacion_tipo(df_filtrado, "Ingreso")
 comparacion_egresos = preparar_comparacion_tipo(df_filtrado, "Egreso")
 df_desvios = preparar_desvios(df_filtrado)
 
-base_hist = construir_base_historica(df)
-base_hist = base_hist[base_hist["Mes"].isin([m for m in meses_sel if m in MESES_HISTORICOS])].copy()
+mes_referencia_hist = ordenar_meses(meses_sel)[-1] if meses_sel else mes_foco_default
+meses_historicos = obtener_meses_historicos(df, mes_referencia_hist)
+base_hist = construir_base_historica(df, meses_historicos)
 
 flujo_historico = preparar_historico_flujo(base_hist)
 top10_egresos_historicos = preparar_top10_egresos_historicos(base_hist)
@@ -692,27 +766,36 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">3️⃣ Causas</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">¿Qué subcategorías explican el desvío?</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-subtitle">¿Qué subcategorías explican la mejora o deterioro vs proyectado en el flujo?</div>',
+    unsafe_allow_html=True
+)
 
 if df_desvios.empty:
     st.info("No hay datos suficientes para analizar desvíos.")
 else:
-    top_desvios = df_desvios.head(10).copy().sort_values("Desvio")
+    top_desvios = df_desvios.head(10).copy().sort_values("ImpactoFlujo")
 
     fig_desvios = crear_fig_bar_simple(
         top_desvios,
-        x="Desvio",
+        x="ImpactoFlujo",
         y="Subcategoria",
         orientation="h",
-        title="Top desvíos por subcategoría (Real - Proyectado)"
+        title="Top impactos por subcategoría en el flujo vs proyectado"
     )
     fig_desvios.update_traces(marker_color=COLOR_REAL)
     fig_desvios.update_layout(height=520)
     st.plotly_chart(fig_desvios, width="stretch")
 
     principal = df_desvios.iloc[0]
+    if principal["ImpactoFlujo"] >= 0:
+        lectura_principal = "mejora"
+    else:
+        lectura_principal = "deterioro"
     st.markdown(
-        f'<div class="warning-box">El mayor desvío proviene de <b>{principal["Subcategoria"]}</b> con un desvío de <b>{format_currency(principal["Desvio"])}</b>.</div>',
+        f'<div class="warning-box">La principal subcategoría es <b>{principal["Subcategoria"]}</b> '
+        f'({principal["Tipo"]}) con un <b>{lectura_principal}</b> de <b>{format_currency(principal["ImpactoFlujo"])}</b> '
+        'sobre el flujo vs proyectado.</div>',
         unsafe_allow_html=True
     )
 
@@ -728,7 +811,7 @@ st.markdown('<div class="section-subtitle">¿El problema está concentrado o rep
 if df_desvios.empty:
     st.info("No hay datos suficientes para analizar concentración.")
 else:
-    total_abs = df_desvios["AbsDesvio"].sum()
+    total_abs = df_desvios["AbsImpactoFlujo"].sum()
 
     if total_abs == 0:
         st.info("No hay desvíos relevantes para analizar concentración.")
@@ -741,8 +824,8 @@ else:
             fig_pareto = crear_fig_bar_simple(
                 top_pareto,
                 x="Subcategoria",
-                y="AbsDesvio",
-                title="Top 5 desvíos por impacto"
+                y="AbsImpactoFlujo",
+                title="Top 5 subcategorías por impacto absoluto en el flujo"
             )
             fig_pareto.update_traces(marker_color=COLOR_REAL)
             st.plotly_chart(fig_pareto, width="stretch")
@@ -766,8 +849,8 @@ st.markdown('<div class="section-subtitle">Profundización por subcategoría.</d
 if df_desvios.empty:
     st.info("No hay detalle para mostrar.")
 else:
-    detalle = df_desvios[["Subcategoria", "Proyectado", "Real", "Desvio", "AbsDesvio"]].copy()
-    detalle = detalle.sort_values("AbsDesvio", ascending=False)
+    detalle = df_desvios[["Tipo", "Subcategoria", "Proyectado", "Real", "Desvio", "ImpactoFlujo", "AbsImpactoFlujo"]].copy()
+    detalle = detalle.sort_values("AbsImpactoFlujo", ascending=False)
 
     st.dataframe(detalle, width="stretch")
 
@@ -778,7 +861,11 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">6️⃣ ¿Cómo estamos en comparación a meses anteriores?</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">Enero y febrero ignoran escenario. Marzo toma solo Real.</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="section-subtitle">Comparación histórica hasta {mes_referencia_hist}. '
+    'Los meses sin escenario toman todos sus datos y los meses con escenario usan solo Real.</div>',
+    unsafe_allow_html=True
+)
 
 if flujo_historico.empty:
     st.info("No hay datos suficientes para analizar meses anteriores.")
@@ -824,7 +911,9 @@ else:
         st.plotly_chart(fig_egresos_hist, width="stretch")
 
     if top10_egresos_historicos.empty:
-        st.info("No hay egresos suficientes para comparar los top 10 entre los 3 meses.")
+        st.info(
+            f"No hay egresos suficientes para comparar los top 10 entre {unir_meses_legible(meses_historicos).lower()}."
+        )
     else:
         fig_top10 = crear_fig_bar_simple(
             top10_egresos_historicos,
@@ -832,7 +921,7 @@ else:
             y="Subcategoria",
             color="Mes",
             orientation="h",
-            title="Comparativa de los Top 10 egresos principales entre enero, febrero y marzo"
+            title=f"Comparativa de los Top 10 egresos principales entre {unir_meses_legible(meses_historicos).lower()}"
         )
         fig_top10.update_layout(height=650)
         st.plotly_chart(fig_top10, width="stretch")
