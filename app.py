@@ -220,28 +220,7 @@ def normalizar_serie_monto(serie):
 
 
 def resolver_columna_monto(df):
-    monto_base = normalizar_serie_monto(df["Monto"]) if "Monto" in df.columns else pd.Series(0, index=df.index, dtype="float64")
-
-    columnas_extra = [col for col in df.columns if str(col).startswith("Unnamed:")]
-    if not columnas_extra:
-        return monto_base.fillna(0)
-
-    monto_extra = pd.Series(pd.NA, index=df.index, dtype="object")
-    for col in columnas_extra:
-        valores = df[col].astype(str).str.strip()
-        mascara = valores.ne("") & valores.ne("nan")
-        monto_extra = monto_extra.where(~mascara, df[col])
-
-    monto_extra = normalizar_serie_monto(monto_extra)
-
-    # En la hoja actual, los montos proyectados vienen en una columna extra,
-    # mientras que los reales siguen en la columna Monto.
-    usar_extra = (
-        df["Escenario"].astype(str).str.strip().eq("Proyectado")
-        & monto_extra.notna()
-    )
-
-    return monto_base.where(~usar_extra, monto_extra).fillna(0)
+    return normalizar_serie_monto(df["Monto"]).fillna(0)
 
 
 @st.cache_data(ttl=300)
