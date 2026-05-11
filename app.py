@@ -214,29 +214,34 @@ def normalizar_serie_monto(serie):
         .str.strip()
         .replace({"nan": "", "None": ""})
         .str.replace(".", "", regex=False)
-        .str.replace(",", "", regex=False),
+        .str.replace(",", ".", regex=False),
         errors="coerce"
     )
 
 
 def resolver_columna_monto(df):
-    columnas_extra = [
-        col for col in df.columns
-        if str(col).startswith("Unnamed:")
-    ]
+    monto_base = normalizar_serie_monto(df["Monto"]) if "Monto" in df.columns else pd.Series(0, index=df.index, dtype="float64")
 
-    columnas_monto = ["Monto", *columnas_extra]
-    monto_resuelto = pd.Series(pd.NA, index=df.index, dtype="object")
+    columnas_extra = [col for col in df.columns if str(col).startswith("Unnamed:")]
+    if not columnas_extra:
+        return monto_base.fillna(0)
 
-    # Si la hoja trae una columna adicional de importes a la derecha,
-    # priorizamos la última no vacía porque suele ser la cifra vigente.
-    for col in columnas_monto:
-        if col in df.columns:
-            valores = df[col].astype(str).str.strip()
-            mascara = valores.ne("") & valores.ne("nan")
-            monto_resuelto = monto_resuelto.where(~mascara, df[col])
+    monto_extra = pd.Series(pd.NA, index=df.index, dtype="object")
+    for col in columnas_extra:
+        valores = df[col].astype(str).str.strip()
+        mascara = valores.ne("") & valores.ne("nan")
+        monto_extra = monto_extra.where(~mascara, df[col])
 
-    return normalizar_serie_monto(monto_resuelto).fillna(0)
+    monto_extra = normalizar_serie_monto(monto_extra)
+
+    # En la hoja actual, los montos proyectados vienen en una columna extra,
+    # mientras que los reales siguen en la columna Monto.
+    usar_extra = (
+        df["Escenario"].astype(str).str.strip().eq("Proyectado")
+        & monto_extra.notna()
+    )
+
+    return monto_base.where(~usar_extra, monto_extra).fillna(0)
 
 
 @st.cache_data(ttl=300)
