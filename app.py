@@ -208,6 +208,37 @@ def unir_meses_legible(meses):
     return f"{', '.join(meses[:-1])} y {meses[-1]}"
 
 
+def normalizar_serie_monto(serie):
+    return pd.to_numeric(
+        serie.astype(str)
+        .str.strip()
+        .replace({"nan": "", "None": ""})
+        .str.replace(".", "", regex=False)
+        .str.replace(",", "", regex=False),
+        errors="coerce"
+    )
+
+
+def resolver_columna_monto(df):
+    columnas_extra = [
+        col for col in df.columns
+        if str(col).startswith("Unnamed:")
+    ]
+
+    columnas_monto = ["Monto", *columnas_extra]
+    monto_resuelto = pd.Series(pd.NA, index=df.index, dtype="object")
+
+    # Si la hoja trae una columna adicional de importes a la derecha,
+    # priorizamos la última no vacía porque suele ser la cifra vigente.
+    for col in columnas_monto:
+        if col in df.columns:
+            valores = df[col].astype(str).str.strip()
+            mascara = valores.ne("") & valores.ne("nan")
+            monto_resuelto = monto_resuelto.where(~mascara, df[col])
+
+    return normalizar_serie_monto(monto_resuelto).fillna(0)
+
+
 @st.cache_data(ttl=300)
 def cargar_datos():
     response = requests.get(SHEET_URL, verify=certifi.where(), timeout=30)
@@ -225,14 +256,7 @@ def cargar_datos():
 
     df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
 
-    df["Monto"] = (
-        df["Monto"]
-        .astype(str)
-        .str.strip()
-        .str.replace(".", "", regex=False)
-        .str.replace(",", "", regex=False)
-    )
-    df["Monto"] = pd.to_numeric(df["Monto"], errors="coerce").fillna(0)
+    df["Monto"] = resolver_columna_monto(df)
 
     for col in ["Mes", "Tipo", "Categoria", "Subcategoria", "Escenario"]:
         df[col] = df[col].astype(str).str.strip()
@@ -595,18 +619,20 @@ def render_kpi_card(label, value):
 # =========================================================
 df = cargar_datos()
 mes_foco_default = obtener_mes_foco(df)
+meses_disponibles = [m for m in MESES_ORDEN if m in df["Mes"].astype(str).unique()]
+meses_default = meses_disponibles.copy()
 
 # =========================================================
 # RESET FILTROS
 # =========================================================
 if st.sidebar.button("Resetear filtros"):
-    st.session_state["meses_sel"] = [mes_foco_default]
+    st.session_state["meses_sel"] = meses_default
     st.session_state["tipos_sel"] = ["Ingreso", "Egreso"]
     st.session_state["escenarios_sel"] = ["Real", "Proyectado"]
 
 # Defaults seguros
 if "meses_sel" not in st.session_state:
-    st.session_state["meses_sel"] = [mes_foco_default]
+    st.session_state["meses_sel"] = meses_default
 
 if "tipos_sel" not in st.session_state:
     st.session_state["tipos_sel"] = ["Ingreso", "Egreso"]
@@ -631,8 +657,6 @@ st.markdown(
 # SIDEBAR
 # =========================================================
 st.sidebar.markdown("## Filtros")
-
-meses_disponibles = [m for m in MESES_ORDEN if m in df["Mes"].astype(str).unique()]
 tipos_disponibles = ["Ingreso", "Egreso"]
 escenarios_disponibles = ["Real", "Proyectado", "Sin escenario"]
 
