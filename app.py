@@ -376,6 +376,24 @@ def preparar_desvios(df_base):
     return tabla.sort_values("AbsImpactoFlujo", ascending=False)
 
 
+def construir_base_comparacion(df_original, mes_foco, tipos_sel=None, escenarios_sel=None):
+    base = df_original[df_original["Mes"] == mes_foco].copy()
+
+    if tipos_sel:
+        base = base[base["Tipo"].isin(tipos_sel)]
+
+    escenarios_validos = ["Real", "Proyectado"]
+    if escenarios_sel:
+        escenarios_validos = [esc for esc in escenarios_sel if esc in ["Real", "Proyectado"]]
+
+    if escenarios_validos:
+        base = base[base["Escenario"].isin(escenarios_validos)]
+    else:
+        base = base.iloc[0:0].copy()
+
+    return base
+
+
 def obtener_meses_historicos(df_original, mes_referencia):
     meses_presentes = set(df_original["Mes"].dropna().astype(str).tolist())
 
@@ -679,6 +697,7 @@ escenarios_sel = st.sidebar.multiselect(
 )
 
 df_filtrado = aplicar_filtros(df, meses_sel, tipos_sel, escenarios_sel)
+df_comparacion = construir_base_comparacion(df, mes_foco_default, tipos_sel, escenarios_sel)
 
 if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
@@ -687,18 +706,18 @@ if df_filtrado.empty:
 # =========================================================
 # CÁLCULOS PRINCIPALES
 # =========================================================
-ingreso_real = calcular_total(df_filtrado, "Ingreso", "Real")
-ingreso_proyectado = calcular_total(df_filtrado, "Ingreso", "Proyectado")
-egreso_real = calcular_total(df_filtrado, "Egreso", "Real")
-egreso_proyectado = calcular_total(df_filtrado, "Egreso", "Proyectado")
+ingreso_real = calcular_total(df_comparacion, "Ingreso", "Real")
+ingreso_proyectado = calcular_total(df_comparacion, "Ingreso", "Proyectado")
+egreso_real = calcular_total(df_comparacion, "Egreso", "Real")
+egreso_proyectado = calcular_total(df_comparacion, "Egreso", "Proyectado")
 
 flujo_real = ingreso_real - egreso_real
 flujo_proyectado = ingreso_proyectado - egreso_proyectado
 variacion_flujo = flujo_real - flujo_proyectado
 
-comparacion_ingresos = preparar_comparacion_tipo(df_filtrado, "Ingreso")
-comparacion_egresos = preparar_comparacion_tipo(df_filtrado, "Egreso")
-df_desvios = preparar_desvios(df_filtrado)
+comparacion_ingresos = preparar_comparacion_tipo(df_comparacion, "Ingreso")
+comparacion_egresos = preparar_comparacion_tipo(df_comparacion, "Egreso")
+df_desvios = preparar_desvios(df_comparacion)
 
 mes_referencia_hist = ordenar_meses(meses_sel)[-1] if meses_sel else mes_foco_default
 meses_historicos = obtener_meses_historicos(df, mes_referencia_hist)
@@ -712,7 +731,10 @@ top10_egresos_historicos = preparar_top10_egresos_historicos(base_hist)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">1️⃣ Resultado</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">¿Cómo estamos respecto a lo esperado?</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="section-subtitle">¿Cómo estamos respecto a lo esperado en {mes_foco_default}?</div>',
+    unsafe_allow_html=True
+)
 
 k1, k2, k3 = st.columns(3)
 with k1:
@@ -745,7 +767,10 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">2️⃣ Comparación</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">¿El problema viene de ingresos o de egresos?</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="section-subtitle">Comparación Real vs Proyectado de {mes_foco_default}: ¿el problema viene de ingresos o de egresos?</div>',
+    unsafe_allow_html=True
+)
 
 col_a, col_b = st.columns(2)
 
@@ -791,7 +816,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">3️⃣ Causas</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="section-subtitle">¿Qué subcategorías explican la mejora o deterioro vs proyectado en el flujo?</div>',
+    f'<div class="section-subtitle">¿Qué subcategorías explican la mejora o deterioro vs proyectado en {mes_foco_default}?</div>',
     unsafe_allow_html=True
 )
 
@@ -830,7 +855,10 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">4️⃣ Concentración</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">¿El problema está concentrado o repartido?</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="section-subtitle">Impacto concentrado o repartido en {mes_foco_default}.</div>',
+    unsafe_allow_html=True
+)
 
 if df_desvios.empty:
     st.info("No hay datos suficientes para analizar concentración.")
@@ -868,7 +896,10 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">5️⃣ Detalle</div>', unsafe_allow_html=True)
-st.markdown('<div class="section-subtitle">Profundización por subcategoría.</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="section-subtitle">Profundización por subcategoría para {mes_foco_default}.</div>',
+    unsafe_allow_html=True
+)
 
 if df_desvios.empty:
     st.info("No hay detalle para mostrar.")
